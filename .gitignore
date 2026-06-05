@@ -1,0 +1,46 @@
+# Python / cache
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# Build artifacts
+build/
+dist/
+submodules/**/build/
+
+# Data and experiment outputs
+data/
+output/
+tensorboard_3d/
+screenshots/
+
+# Large reconstruction artifacts
+*.pickle
+*.pkl
+*.npy
+*.npz
+*.raw
+*.mhd
+*.ply
+*.pth
+*.pt
+*.ckpt
+*.tar
+*.tar.gz
+*.zip
+
+# Presentation / local reports
+*.pptx
+new.png
+recon_volume*
+
+# OS
+.DS_Store
+Thumbs.db

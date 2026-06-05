@@ -1,0 +1,47 @@
+scene: chest_acui_empty_prune_5k
+source_path: data/chest_50.pickle
+model_path: ./output/stage3/chest_acui_empty_prune_5k
+iterations: 5000
+position_lr_init: 0.00019
+position_lr_final: 0.0000019
+position_lr_delay_mult: 0.01
+position_lr_max_steps: 5000
+feature_lr: 0.002
+opacity_lr: 0.008
+radiodensity_lr: 0.05
+scaling_lr: 0.005
+rotation_lr: 0.001
+percent_dense: 0.01
+lambda_dssim: 0.2
+densification_interval: 200
+opacity_reset_interval: 4000
+radiodensity_reset_interval: 2000
+densify_from_iter: 500
+densify_until_iter: 3000
+densify_grad_threshold: 0.000026
+random_background: false
+interval: 8
+train_num: 50
+test_iterations: [1000, 2000, 5000]
+save_iterations: [5000]
+render_iterations: [1000, 2000, 5000]
+analysis_iterations: [1000, 2000, 5000]
+render_num_views: -1
+analysis_bins: 20
+init_mode: acui
+prior_source: gt
+prior_path: output/priors/chest_gt_q98/prior_data.npz
+prior_threshold_mode: quantile
+prior_threshold_value: 0.98
+prior_max_points: 50000
+hybrid_prior_points: 25000
+hybrid_acui_points: 25000
+save_init_analysis: true
+use_prior_refinement: true
+refinement_prior_path: output/priors/chest_gt_q98/prior_data.npz
+refinement_from_iter: 500
+roi_densify_enabled: false
+roi_densify_weight: 2.0
+empty_prune_enabled: true
+empty_prune_opacity: 0.01
+empty_prune_mask_source: roi

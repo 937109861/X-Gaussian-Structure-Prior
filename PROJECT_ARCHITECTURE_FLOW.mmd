@@ -1,0 +1,46 @@
+flowchart TD
+    A["输入数据: sparse X-ray views + camera geometry + CT/重建体"] --> B["X-Gaussian 数据读取与 Scene 构建"]
+    A --> C["体先验构建 scripts/build_prior.py"]
+
+    C --> C1["归一化 + 阈值分割"]
+    C1 --> C2["occupancy mask"]
+    C1 --> C3["ROI mask"]
+    C2 --> C4["先验点云 point_cloud.ply / prior_data.npz"]
+    C3 --> C4
+
+    B --> D["Gaussian 初始化"]
+    C4 --> D
+    D --> D1["ACUI"]
+    D --> D2["prior_init"]
+    D --> D3["hybrid_init"]
+
+    D1 --> E["训练循环 train.py"]
+    D2 --> E
+    D3 --> E
+
+    E --> F["可微 X-ray Gaussian Renderer"]
+    F --> G["2D 投影监督: L1 + SSIM"]
+    F --> H["可选结构损失: Sobel / masked Sobel"]
+    C4 --> I["PriorRefinementController"]
+    I --> J["ROI densification bias"]
+    I --> K["empty-region pruning bias"]
+    C4 --> L["可选低分辨率占据一致性 L_occ"]
+
+    G --> M["反向传播 + optimizer"]
+    H --> M
+    L --> M
+    J --> N["densify_and_prune"]
+    K --> N
+    M --> N
+    N --> E
+
+    E --> O["训练后 Gaussian 表示"]
+    O --> P["NVS 渲染与 2D 指标评估"]
+    O --> Q["Gaussian-to-volume 导出"]
+    C4 --> Q
+    Q --> Q1["baseline export"]
+    Q --> Q2["structure-preserved export"]
+    Q1 --> R["Volume PSNR / MAE / slice SSIM"]
+    Q2 --> R
+    R --> S["论文结论与消融分析"]
+    P --> S
