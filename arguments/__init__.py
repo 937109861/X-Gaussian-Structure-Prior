@@ -51,6 +51,7 @@ class ModelParams(ParamGroup):
         self.eval = False
         self.dump_pickle = False
         self.interval = 8
+        self.acui_jitter = 0.0
         self.train_num = 50
         self.add_num = 50
         self.nview = 5
@@ -95,6 +96,7 @@ class OptimizationParams(ParamGroup):
         self.rotation_lr = 0.001
         self.percent_dense = 0.01
         self.lambda_dssim = 0.2
+        self.lambda_render = 1.0
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
         self.radiodensity_reset_interval = 3000
@@ -122,6 +124,40 @@ class OptimizationParams(ParamGroup):
         self.occ_source = "roi"
         self.occ_warmup_from_iter = 500
         self.occ_debug_interval = 1000
+        self.use_volume_loss = False
+        self.volume_grid_size = 32
+        self.volume_loss_type = "l1"
+        self.lambda_volume = 0.0001
+        self.volume_density_mode = "opacity"
+        self.volume_splat_mode = "trilinear"
+        self.volume_splat_radius = 2
+        self.volume_min_sigma_voxels = 0.75
+        self.volume_max_sigma_voxels = 3.0
+        self.volume_dgr_sigma_scale = 1.0
+        self.volume_dgr_normalize_kernel = False
+        self.volume_dgr_supersample = 1
+        self.volume_dgr_kernel_cutoff = 0.0
+        self.volume_dgr_max_splat_radius = 0
+        self.volume_loss_interval = 100
+        self.volume_warmup_from_iter = 1000
+        self.volume_use_prior_mask = False
+        self.volume_mask_source = "roi"
+        self.volume_roi_weight = 1.0
+        self.volume_background_weight = 0.1
+        self.volume_tissue_balance = False
+        self.volume_soft_tissue_weight = 2.0
+        self.volume_hard_tissue_weight = 1.0
+        self.volume_soft_tissue_min_quantile = 0.05
+        self.volume_soft_tissue_max_quantile = 0.75
+        self.volume_hard_tissue_min_quantile = 0.90
+        self.volume_tv_weight = 0.0
+        self.volume_debug_interval = 0
+        self.use_gaussian_reg = False
+        self.scale_floor = 0.75
+        self.scale_aniso_max_ratio = 5.0
+        self.lambda_scale_floor = 0.0
+        self.lambda_scale_aniso = 0.0
+        self.lambda_density_entropy = 0.0
         super().__init__(parser, "Optimization Parameters")
 
 

@@ -6,12 +6,14 @@ import pickle
 import imageio.v2 as imageio
 import numpy as np
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 
 from scene.dataset_readers import ConeGeometry, get_voxels
 from scene.gaussian_model import GaussianModel_Xray
 from utils.general_utils import safe_state
 from utils.system_utils import searchForMaxIteration
+from utils.differentiable_volume import gaussian_centers_to_dgr_grid
 from utils.export_volume import (
     calibrate_density_weights,
     gaussian_roi_gate,
@@ -56,6 +58,10 @@ def gaussian_density_weights(gaussians, mode):
 def gaussian_density_weights_extended(gaussians, mode):
     if mode in ("opacity", "opacity_dc"):
         return gaussian_density_weights(gaussians, mode)
+    if mode in ("radiodensity", "attenuation"):
+        if not hasattr(gaussians, "get_radiodensity"):
+            return gaussians.get_opacity.detach().reshape(-1).cpu().numpy().astype(np.float32)
+        return gaussians.get_radiodensity.detach().reshape(-1).cpu().numpy().astype(np.float32)
     if mode == "opacity_scale":
         opacity = gaussians.get_opacity.detach().reshape(-1).cpu().numpy().astype(np.float32)
         scales = gaussians.get_scaling.detach().cpu().numpy().astype(np.float32)
@@ -84,6 +90,62 @@ def normalize_volume(volume):
     if vmax <= vmin:
         return np.zeros_like(volume, dtype=np.float32), vmin, vmax
     return (volume - vmin) / (vmax - vmin), vmin, vmax
+
+
+def smooth_volume_gaussian(volume, sigma):
+    sigma = float(sigma)
+    if sigma <= 0.0:
+        return volume.astype(np.float32, copy=False)
+
+    radius = max(1, int(np.ceil(3.0 * sigma)))
+    coords = torch.arange(-radius, radius + 1, dtype=torch.float32)
+    kernel = torch.exp(-0.5 * (coords / sigma) ** 2)
+    kernel = kernel / torch.clamp(kernel.sum(), min=1e-8)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    vol = torch.from_numpy(np.asarray(volume, dtype=np.float32)).to(device=device)[None, None]
+    kernel = kernel.to(device=device)
+
+    vol = F.pad(vol, (radius, radius, 0, 0, 0, 0), mode="replicate")
+    vol = F.conv3d(vol, kernel.view(1, 1, 1, 1, -1))
+    vol = F.pad(vol, (0, 0, radius, radius, 0, 0), mode="replicate")
+    vol = F.conv3d(vol, kernel.view(1, 1, 1, -1, 1))
+    vol = F.pad(vol, (0, 0, 0, 0, radius, radius), mode="replicate")
+    vol = F.conv3d(vol, kernel.view(1, 1, -1, 1, 1))
+    return vol[0, 0].detach().cpu().numpy().astype(np.float32)
+
+
+def smooth_volume_median(volume, kernel_size):
+    kernel_size = int(kernel_size)
+    if kernel_size <= 1:
+        return volume.astype(np.float32, copy=False)
+    if kernel_size % 2 == 0:
+        raise ValueError("post_median_size must be odd")
+
+    radius = kernel_size // 2
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    vol = torch.from_numpy(np.asarray(volume, dtype=np.float32)).to(device=device)[None, None]
+    padded = F.pad(vol, (radius, radius, radius, radius, radius, radius), mode="replicate")
+
+    patches = []
+    d, h, w = vol.shape[-3:]
+    for dz in range(kernel_size):
+        for dy in range(kernel_size):
+            for dx in range(kernel_size):
+                patches.append(padded[:, :, dz:dz + d, dy:dy + h, dx:dx + w])
+    stacked = torch.stack(patches, dim=0)
+    filtered = torch.median(stacked, dim=0).values
+    return filtered[0, 0].detach().cpu().numpy().astype(np.float32)
+
+
+def apply_contrast_gamma(volume, gamma):
+    gamma = float(gamma)
+    if abs(gamma - 1.0) < 1e-8:
+        return volume.astype(np.float32, copy=False)
+    if gamma <= 0.0:
+        raise ValueError("post_contrast_gamma must be positive")
+    volume = np.asarray(volume, dtype=np.float32)
+    return np.power(np.clip(volume, 0.0, None), gamma).astype(np.float32)
 
 
 def center_voxelize(xyz, weights, geometry):
@@ -142,6 +204,77 @@ def gaussian_voxelize(xyz, scales, weights, geometry, cutoff, max_gaussians):
     return volume, int(order.shape[0])
 
 
+def dgr_voxelize(gaussians, weights, geometry, args):
+    shape = tuple(int(v) for v in geometry.nVoxel)
+    if len(set(shape)) != 1:
+        raise ValueError(f"DGR export currently requires a cubic volume, got nVoxel={shape}")
+    grid_size = int(shape[0])
+
+    voxel_grid = get_voxels(geometry)
+    grid_min = voxel_grid[0, 0, 0].astype(np.float32)
+    grid_max = voxel_grid[-1, -1, -1].astype(np.float32)
+    weights_t = torch.from_numpy(np.asarray(weights, dtype=np.float32)).to(gaussians.get_xyz.device)
+
+    if args.max_gaussians and args.max_gaussians > 0 and weights_t.numel() > args.max_gaussians:
+        _, selected = torch.topk(weights_t, k=int(args.max_gaussians), largest=True, sorted=False)
+        xyz = gaussians.get_xyz[selected]
+        scales = gaussians.get_scaling[selected]
+        rotations = gaussians.get_rotation[selected]
+        weights_t = weights_t[selected]
+    else:
+        xyz = gaussians.get_xyz
+        scales = gaussians.get_scaling
+        rotations = gaussians.get_rotation
+
+    reference_grid_size = int(args.dgr_reference_grid_size)
+    resolution_scale = 1.0
+    if reference_grid_size > 0:
+        resolution_scale = float(grid_size) / float(reference_grid_size)
+    splat_radius = max(1, int(round(float(args.dgr_splat_radius) * resolution_scale)))
+    min_sigma_voxels = float(args.dgr_min_sigma_voxels) * resolution_scale
+    max_sigma_voxels = float(args.dgr_max_sigma_voxels) * resolution_scale
+    sigma_scale = float(args.dgr_sigma_scale)
+
+    volume_t, valid = gaussian_centers_to_dgr_grid(
+        xyz,
+        scales,
+        rotations,
+        weights_t,
+        grid_min,
+        grid_max,
+        grid_size=grid_size,
+        radius=splat_radius,
+        min_sigma_voxels=min_sigma_voxels,
+        max_sigma_voxels=max_sigma_voxels,
+        sigma_scale=sigma_scale,
+        normalize_kernel=args.dgr_normalize_kernel,
+        supersample=args.dgr_supersample,
+        kernel_cutoff=args.dgr_kernel_cutoff,
+        max_splat_radius=args.dgr_max_splat_radius,
+        normalize=not args.dgr_no_normalize_internal,
+    )
+    volume = volume_t.detach().cpu().numpy().astype(np.float32)
+    stats = {
+        "dgr_grid_size": int(grid_size),
+        "dgr_reference_grid_size": int(reference_grid_size),
+        "dgr_resolution_scale": float(resolution_scale),
+        "dgr_splat_radius": int(splat_radius),
+        "dgr_base_splat_radius": int(args.dgr_splat_radius),
+        "dgr_min_sigma_voxels": float(min_sigma_voxels),
+        "dgr_base_min_sigma_voxels": float(args.dgr_min_sigma_voxels),
+        "dgr_max_sigma_voxels": float(max_sigma_voxels),
+        "dgr_base_max_sigma_voxels": float(args.dgr_max_sigma_voxels),
+        "dgr_sigma_scale": float(sigma_scale),
+        "dgr_normalize_kernel": bool(args.dgr_normalize_kernel),
+        "dgr_supersample": int(args.dgr_supersample),
+        "dgr_kernel_cutoff": float(args.dgr_kernel_cutoff),
+        "dgr_max_splat_radius": int(args.dgr_max_splat_radius),
+        "dgr_internal_normalize": not bool(args.dgr_no_normalize_internal),
+        "dgr_valid_gaussian_ratio": float(valid.float().mean().detach().item()) if valid.numel() else 0.0,
+    }
+    return volume, int(valid.sum().detach().item()), stats
+
+
 def save_preview_slices(volume, out_dir):
     preview_dir = os.path.join(out_dir, "preview_slices")
     os.makedirs(preview_dir, exist_ok=True)
@@ -183,14 +316,14 @@ def main():
     parser.add_argument("--sh_degree", type=int, default=3)
     parser.add_argument("--out_dir", default=None)
     parser.add_argument("--basename", default="recon_volume")
-    parser.add_argument("--mode", choices=["center", "gaussian"], default="gaussian")
+    parser.add_argument("--mode", choices=["center", "gaussian", "dgr"], default="gaussian")
     parser.add_argument("--density", choices=["opacity", "opacity_dc"], default="opacity")
     parser.add_argument("--export_mode", choices=["baseline", "structure_preserved", "structure_density"], default="baseline")
     parser.add_argument("--prior_path", default="", help="prior_data.npz for structure-preserved export.")
     parser.add_argument("--use_roi_gate", action="store_true")
     parser.add_argument("--roi_gate_strength", type=float, default=0.2)
     parser.add_argument("--roi_gate_source", choices=["roi", "occupancy"], default="roi")
-    parser.add_argument("--density_mapping_mode", choices=["opacity", "opacity_dc", "opacity_scale", "opacity_feature_scale"], default=None)
+    parser.add_argument("--density_mapping_mode", choices=["opacity", "opacity_dc", "opacity_scale", "opacity_feature_scale", "radiodensity", "attenuation"], default=None)
     parser.add_argument("--density_calibration", choices=["none", "percentile", "log"], default="percentile")
     parser.add_argument("--calibration_percentile", type=float, default=99.0)
     parser.add_argument("--structure_prior_blend", type=float, default=0.35)
@@ -198,8 +331,21 @@ def main():
     parser.add_argument("--structure_occupancy_boost", type=float, default=1.35)
     parser.add_argument("--structure_outside_roi_scale", type=float, default=0.08)
     parser.add_argument("--cutoff", type=float, default=3.0)
+    parser.add_argument("--dgr_splat_radius", type=int, default=2)
+    parser.add_argument("--dgr_min_sigma_voxels", type=float, default=0.5)
+    parser.add_argument("--dgr_max_sigma_voxels", type=float, default=4.0)
+    parser.add_argument("--dgr_sigma_scale", type=float, default=1.25)
+    parser.add_argument("--dgr_reference_grid_size", type=int, default=0, help="Training grid size used to scale DGR voxel sigmas during higher-resolution export. 0 disables scaling.")
+    parser.add_argument("--dgr_normalize_kernel", action="store_true")
+    parser.add_argument("--dgr_supersample", type=int, default=1)
+    parser.add_argument("--dgr_kernel_cutoff", type=float, default=0.0)
+    parser.add_argument("--dgr_max_splat_radius", type=int, default=0)
+    parser.add_argument("--dgr_no_normalize_internal", action="store_true")
     parser.add_argument("--max_gaussians", type=int, default=0, help="0 means use all gaussians.")
     parser.add_argument("--no_normalize", action="store_true")
+    parser.add_argument("--post_median_size", type=int, default=0, help="Optional odd 3D median filter size to suppress blocky black/white holes before Gaussian smoothing.")
+    parser.add_argument("--post_smooth_sigma", type=float, default=0.0, help="Optional 3D Gaussian smoothing on the exported volume to reduce block artifacts.")
+    parser.add_argument("--post_contrast_gamma", type=float, default=1.0, help="Optional gamma applied after normalization to recover display contrast. Values below 1 brighten low/mid densities.")
     parser.add_argument("--slicer_export", action="store_true", help="Also save a uint16 display volume for 3D Slicer.")
     parser.add_argument("--display_percentile_low", type=float, default=1.0)
     parser.add_argument("--display_percentile_high", type=float, default=99.5)
@@ -267,10 +413,20 @@ def main():
         weights, calibration_stats = calibrate_density_weights(weights, mode="none")
         export_extra_stats.update(calibration_stats)
 
+    mode_stats = {}
     if args.mode == "center":
         volume, used = center_voxelize(xyz, weights, geometry)
+    elif args.mode == "dgr":
+        volume, used, mode_stats = dgr_voxelize(gaussians, weights, geometry, args)
     else:
         volume, used = gaussian_voxelize(xyz, scales, weights, geometry, args.cutoff, args.max_gaussians)
+
+    pre_smooth_min = float(volume.min())
+    pre_smooth_max = float(volume.max())
+    if args.post_median_size > 1:
+        volume = smooth_volume_median(volume, args.post_median_size)
+    if args.post_smooth_sigma > 0.0:
+        volume = smooth_volume_gaussian(volume, args.post_smooth_sigma)
 
     raw_min = float(volume.min())
     raw_max = float(volume.max())
@@ -291,6 +447,8 @@ def main():
         volume, norm_min, norm_max = normalize_volume(volume)
     else:
         norm_min, norm_max = raw_min, raw_max
+    if args.post_contrast_gamma != 1.0:
+        volume = apply_contrast_gamma(volume, args.post_contrast_gamma)
 
     npy_path = os.path.join(out_dir, args.basename + ".npy")
     np.save(npy_path, volume.astype(np.float32))
@@ -330,12 +488,18 @@ def main():
         "mode": args.mode,
         "density": args.density,
         **export_extra_stats,
+        **mode_stats,
         "num_gaussians": int(xyz.shape[0]),
         "num_used_gaussians": int(used),
         "volume_shape": list(volume.shape),
         "dVoxel": geometry.dVoxel.tolist(),
         "raw_min": raw_min,
         "raw_max": raw_max,
+        "pre_smooth_min": pre_smooth_min,
+        "pre_smooth_max": pre_smooth_max,
+        "post_median_size": int(args.post_median_size),
+        "post_smooth_sigma": float(args.post_smooth_sigma),
+        "post_contrast_gamma": float(args.post_contrast_gamma),
         "saved_min": float(volume.min()),
         "saved_max": float(volume.max()),
         "normalization_input_min": norm_min,

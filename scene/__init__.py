@@ -54,6 +54,7 @@ class Scene:
                 prior_max_points=args.prior_max_points,
                 hybrid_prior_points=args.hybrid_prior_points,
                 hybrid_acui_points=args.hybrid_acui_points,
+                acui_jitter=args.acui_jitter,
             )
         else:
             assert False, "Could not recognize scene type!"

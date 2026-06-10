@@ -7,7 +7,14 @@ from gaussian_renderer import render
 import sys
 from scene import Scene, GaussianModel_Xray
 from refinement import PriorRefinementController
-from losses import LowResPriorOccupancyLoss, masked_sobel_edge_loss, sobel_edge_loss
+from losses import (
+    LowResPriorOccupancyLoss,
+    LowResVolumeLoss,
+    gaussian_scale_regularization,
+    masked_sobel_edge_loss,
+    radiodensity_entropy_regularization,
+    sobel_edge_loss,
+)
 from utils.general_utils import safe_state, gen_log
 from tqdm import tqdm
 from utils.image_utils import psnr, time2file_name
@@ -51,6 +58,7 @@ def training(
     refinement_controller = None
     prior_analysis_controller = None
     occupancy_loss = None
+    volume_loss = None
     if getattr(opt, "use_prior_refinement", False):
         refinement_prior_path = getattr(opt, "refinement_prior_path", "") or getattr(dataset, "prior_path", "")
         if scene.volume_positions is None:
@@ -92,6 +100,46 @@ def training(
             f"Enabled occupancy consistency loss: prior={occ_prior_path}, "
             f"source={getattr(opt, 'occ_source', 'roi')}, grid={getattr(opt, 'occ_grid_size', 32)}, "
             f"type={getattr(opt, 'occ_loss_type', 'l1')}, lambda={getattr(opt, 'lambda_occ', 0.001)}"
+        )
+    if getattr(opt, "use_volume_loss", False):
+        volume_prior_path = getattr(opt, "refinement_prior_path", "") or getattr(dataset, "prior_path", "")
+        volume_loss = LowResVolumeLoss(
+            target_volume=scene.image_3d,
+            volume_positions=scene.volume_positions,
+            grid_size=getattr(opt, "volume_grid_size", 32),
+            loss_type=getattr(opt, "volume_loss_type", "l1"),
+            density_mode=getattr(opt, "volume_density_mode", "opacity"),
+            splat_mode=getattr(opt, "volume_splat_mode", "trilinear"),
+            splat_radius=getattr(opt, "volume_splat_radius", 2),
+            min_sigma_voxels=getattr(opt, "volume_min_sigma_voxels", 0.75),
+            max_sigma_voxels=getattr(opt, "volume_max_sigma_voxels", 3.0),
+            dgr_sigma_scale=getattr(opt, "volume_dgr_sigma_scale", 1.0),
+            dgr_normalize_kernel=getattr(opt, "volume_dgr_normalize_kernel", False),
+            dgr_supersample=getattr(opt, "volume_dgr_supersample", 1),
+            dgr_kernel_cutoff=getattr(opt, "volume_dgr_kernel_cutoff", 0.0),
+            dgr_max_splat_radius=getattr(opt, "volume_dgr_max_splat_radius", 0),
+            prior_path=volume_prior_path,
+            use_prior_mask=getattr(opt, "volume_use_prior_mask", False),
+            mask_source=getattr(opt, "volume_mask_source", "roi"),
+            roi_weight=getattr(opt, "volume_roi_weight", 1.0),
+            background_weight=getattr(opt, "volume_background_weight", 0.1),
+            tissue_balance=getattr(opt, "volume_tissue_balance", False),
+            soft_tissue_weight=getattr(opt, "volume_soft_tissue_weight", 2.0),
+            hard_tissue_weight=getattr(opt, "volume_hard_tissue_weight", 1.0),
+            soft_tissue_min_quantile=getattr(opt, "volume_soft_tissue_min_quantile", 0.05),
+            soft_tissue_max_quantile=getattr(opt, "volume_soft_tissue_max_quantile", 0.75),
+            hard_tissue_min_quantile=getattr(opt, "volume_hard_tissue_min_quantile", 0.90),
+            volume_tv_weight=getattr(opt, "volume_tv_weight", 0.0),
+        )
+        exp_logger.info(
+            f"Enabled low-res volume loss: grid={getattr(opt, 'volume_grid_size', 32)}, "
+            f"type={getattr(opt, 'volume_loss_type', 'l1')}, "
+            f"density={getattr(opt, 'volume_density_mode', 'opacity')}, "
+            f"splat={getattr(opt, 'volume_splat_mode', 'trilinear')}, "
+            f"lambda={getattr(opt, 'lambda_volume', 0.0001)}, "
+            f"interval={getattr(opt, 'volume_loss_interval', 100)}, "
+            f"warmup={getattr(opt, 'volume_warmup_from_iter', 1000)}, "
+            f"tissue_balance={getattr(opt, 'volume_tissue_balance', False)}"
         )
     if getattr(dataset, "save_init_analysis", False):
         save_init_statistics(dataset.model_path, scene.init_info, gaussians)
@@ -159,10 +207,38 @@ def training(
         occ_prior_grid = None
         if occupancy_loss is not None and iteration >= getattr(opt, "occ_warmup_from_iter", 0):
             occ_loss_value, occ_stats, occ_gaussian_grid, occ_prior_grid = occupancy_loss(gaussians)
+        volume_loss_value = torch.zeros((), dtype=image.dtype, device=image.device)
+        volume_stats = {}
+        volume_pred_grid = None
+        volume_target_grid = None
+        volume_interval = max(1, int(getattr(opt, "volume_loss_interval", 100)))
+        volume_loss_active = (
+            volume_loss is not None
+            and iteration >= getattr(opt, "volume_warmup_from_iter", 0)
+            and iteration % volume_interval == 0
+        )
+        if volume_loss_active:
+            volume_loss_value, volume_stats, volume_pred_grid, volume_target_grid = volume_loss(gaussians)
+        scale_floor_loss = torch.zeros((), dtype=image.dtype, device=image.device)
+        scale_aniso_loss = torch.zeros((), dtype=image.dtype, device=image.device)
+        density_entropy_loss = torch.zeros((), dtype=image.dtype, device=image.device)
+        gaussian_reg_stats = {}
+        if getattr(opt, "use_gaussian_reg", False):
+            scale_floor_loss, scale_aniso_loss, scale_stats = gaussian_scale_regularization(
+                gaussians,
+                scale_floor=getattr(opt, "scale_floor", 0.75),
+                max_anisotropy=getattr(opt, "scale_aniso_max_ratio", 5.0),
+            )
+            density_entropy_loss, density_stats = radiodensity_entropy_regularization(gaussians)
+            gaussian_reg_stats = {**scale_stats, **density_stats}
         loss = (
-            base_loss
+            getattr(opt, "lambda_render", 1.0) * base_loss
             + getattr(opt, "edge_loss_weight", 0.0) * edge_loss_value
             + getattr(opt, "lambda_occ", 0.0) * occ_loss_value
+            + getattr(opt, "lambda_volume", 0.0) * volume_loss_value
+            + getattr(opt, "lambda_scale_floor", 0.0) * scale_floor_loss
+            + getattr(opt, "lambda_scale_aniso", 0.0) * scale_aniso_loss
+            + getattr(opt, "lambda_density_entropy", 0.0) * density_entropy_loss
         )
         loss.backward()
 
@@ -181,6 +257,7 @@ def training(
                         "l1_loss": float(Ll1.item()),
                         "ssim_loss": float(ssim_term.item()),
                         "base_loss": float(base_loss.item()),
+                        "lambda_render": float(getattr(opt, "lambda_render", 1.0)),
                         "edge_loss": float(edge_loss_value.item()),
                         "edge_loss_weight": float(getattr(opt, "edge_loss_weight", 0.0)),
                         "edge_loss_mask_mode": getattr(opt, "edge_loss_mask_mode", "none"),
@@ -190,6 +267,16 @@ def training(
                         "lambda_occ": float(getattr(opt, "lambda_occ", 0.0)),
                         "use_occ_loss": bool(getattr(opt, "use_occ_loss", False)),
                         **occ_stats,
+                        "volume_loss": float(volume_loss_value.item()),
+                        "lambda_volume": float(getattr(opt, "lambda_volume", 0.0)),
+                        "use_volume_loss": bool(getattr(opt, "use_volume_loss", False)),
+                        "volume_loss_active": bool(volume_loss_active),
+                        **volume_stats,
+                        "use_gaussian_reg": bool(getattr(opt, "use_gaussian_reg", False)),
+                        "lambda_scale_floor": float(getattr(opt, "lambda_scale_floor", 0.0)),
+                        "lambda_scale_aniso": float(getattr(opt, "lambda_scale_aniso", 0.0)),
+                        "lambda_density_entropy": float(getattr(opt, "lambda_density_entropy", 0.0)),
+                        **gaussian_reg_stats,
                         "total_loss": float(loss.item()),
                     },
                 )
@@ -203,6 +290,17 @@ def training(
                     occ_gaussian_grid,
                     occ_prior_grid,
                     os.path.join(dataset.model_path, "occupancy_debug", f"iteration_{iteration}"),
+                )
+            if (
+                volume_loss is not None
+                and volume_pred_grid is not None
+                and getattr(opt, "volume_debug_interval", 0) > 0
+                and iteration % getattr(opt, "volume_debug_interval", 1000) == 0
+            ):
+                volume_loss.save_debug(
+                    volume_pred_grid,
+                    volume_target_grid,
+                    os.path.join(dataset.model_path, "volume_debug", f"iteration_{iteration}"),
                 )
             if iteration == opt.iterations:
                 progress_bar.close()

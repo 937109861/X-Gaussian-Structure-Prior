@@ -1,0 +1,71 @@
+scene: chest_dgr_volume_30k_v3_128
+source_path: data/chest_50.pickle
+model_path: ./output/volume_main/chest_dgr_volume_30k_v3_128
+iterations: 30000
+
+# 2D projection rendering is retained only as a weak stabilizer.
+lambda_render: 0.10
+lambda_dssim: 0.2
+
+position_lr_init: 0.00019
+position_lr_final: 0.0000019
+position_lr_delay_mult: 0.01
+position_lr_max_steps: 30000
+feature_lr: 0.002
+opacity_lr: 0.008
+radiodensity_lr: 0.01
+scaling_lr: 0.005
+rotation_lr: 0.001
+percent_dense: 0.01
+
+densification_interval: 200
+opacity_reset_interval: 4000
+radiodensity_reset_interval: 2000
+densify_from_iter: 500
+densify_until_iter: 15000
+densify_grad_threshold: 0.000026
+random_background: false
+
+interval: 8
+train_num: 50
+test_iterations: [1000, 2000, 5000, 10000, 20000, 30000]
+save_iterations: [5000, 10000, 20000, 30000]
+render_iterations: [5000, 10000, 20000, 30000]
+analysis_iterations: [1000, 2000, 5000, 10000, 20000, 30000]
+render_num_views: -1
+analysis_bins: 20
+
+init_mode: acui
+prior_source: gt
+save_init_analysis: true
+
+# Keep skeleton-biased priors disabled for the main full-volume result.
+use_prior_refinement: false
+roi_densify_enabled: false
+empty_prune_enabled: false
+use_occ_loss: false
+use_edge_loss: false
+
+# High-definition 3D branch: train the attenuation volume at final display resolution.
+use_volume_loss: true
+volume_grid_size: 128
+volume_loss_type: l1
+lambda_volume: 0.02
+volume_density_mode: radiodensity
+volume_splat_mode: dgr
+volume_splat_radius: 2
+volume_min_sigma_voxels: 0.5
+volume_max_sigma_voxels: 4.0
+volume_dgr_sigma_scale: 1.25
+volume_dgr_normalize_kernel: false
+volume_loss_interval: 50
+volume_warmup_from_iter: 500
+volume_use_prior_mask: false
+volume_tissue_balance: true
+volume_soft_tissue_weight: 4.0
+volume_hard_tissue_weight: 2.5
+volume_soft_tissue_min_quantile: 0.05
+volume_soft_tissue_max_quantile: 0.75
+volume_hard_tissue_min_quantile: 0.90
+volume_tv_weight: 0.0001
+volume_debug_interval: 5000

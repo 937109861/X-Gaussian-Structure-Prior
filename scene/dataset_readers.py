@@ -196,9 +196,16 @@ def sample_points(xyz, target_num_points):
     return xyz[indices]
 
 
-def build_acui_point_cloud(geometry, interval, max_points=None):
+def build_acui_point_cloud(geometry, interval, max_points=None, jitter=0.0):
     sampled_positions = get_voxels(geometry)[::interval, ::interval, ::interval]
     xyz = sampled_positions.reshape(-1, 3)
+    jitter = float(jitter)
+    if jitter > 0.0 and xyz.shape[0] > 0:
+        spacing = geometry.dVoxel.astype(np.float32) * float(interval) * jitter
+        xyz = xyz + (np.random.random(xyz.shape).astype(np.float32) - 0.5) * spacing[None, :]
+        mins = -geometry.sVoxel.astype(np.float32) / 2.0 + geometry.dVoxel.astype(np.float32) / 2.0
+        maxs = geometry.sVoxel.astype(np.float32) / 2.0 - geometry.dVoxel.astype(np.float32) / 2.0
+        xyz = np.clip(xyz, mins[None, :], maxs[None, :])
     xyz = sample_points(xyz, max_points)
     return build_basic_point_cloud(xyz), xyz.shape[0]
 
@@ -537,6 +544,7 @@ def Xray_readNerfSyntheticInfo(
     prior_max_points=50000,
     hybrid_prior_points=25000,
     hybrid_acui_points=25000,
+    acui_jitter=0.0,
 ):
     print("Reading Training Transforms")
     train_cam_infos = Xray_readCamerasFromTransforms(path, type = "train")
@@ -569,7 +577,7 @@ def Xray_readNerfSyntheticInfo(
 
     if cube_pcd_init:
         acui_target = None if init_mode == "acui" else hybrid_acui_points
-        acui_pcd, acui_count = build_acui_point_cloud(geometry, interval, max_points=acui_target)
+        acui_pcd, acui_count = build_acui_point_cloud(geometry, interval, max_points=acui_target, jitter=acui_jitter)
         print(f"Generating ACUI point cloud ({acui_count})")
     else:
         xyz = np.random.random((100_000, 3)) * 2.6 - 1.3
@@ -629,6 +637,7 @@ def Xray_readNerfSyntheticInfo(
         "num_prior_points": int(compose_info["num_prior_points"]),
         "num_total_points": int(len(pcd.points)) if pcd is not None else int(compose_info["num_acui_points"] + compose_info["num_prior_points"]),
         "acui_interval": int(interval),
+        "acui_jitter": float(acui_jitter),
         "prior_max_points": int(prior_max_points),
         "hybrid_acui_points": int(hybrid_acui_points),
         "hybrid_prior_points": int(hybrid_prior_points),

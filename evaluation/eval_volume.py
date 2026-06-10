@@ -50,6 +50,24 @@ def masked_volume_metrics(prediction, target, mask):
     }
 
 
+def tissue_region_metrics(prediction, target, soft_range=(0.05, 0.75), hard_min=0.90):
+    values = target.reshape(-1)
+    soft_low = float(np.quantile(values, soft_range[0]))
+    soft_high = float(np.quantile(values, soft_range[1]))
+    hard_threshold = float(np.quantile(values, hard_min))
+    soft_mask = (target >= soft_low) & (target <= soft_high)
+    hard_mask = target >= hard_threshold
+    return {
+        "soft_tissue": masked_volume_metrics(prediction, target, soft_mask),
+        "hard_tissue": masked_volume_metrics(prediction, target, hard_mask),
+        "thresholds": {
+            "soft_low": soft_low,
+            "soft_high": soft_high,
+            "hard_threshold": hard_threshold,
+        },
+    }
+
+
 def load_prior_masks(prior_path):
     payload = np.load(prior_path)
     roi_mask = payload["roi_mask"].astype(bool) if "roi_mask" in payload else None
@@ -123,6 +141,7 @@ def evaluate_volume(pred_path, gt_path, out_dir, label, prior_path=None):
     slice_rows, slices = central_slice_metrics(prediction, target)
     save_slice_comparisons(prediction, target, slices, Path(out_dir) / "slices")
     region_metrics = {}
+    region_metrics["tissue"] = tissue_region_metrics(prediction, target)
     if prior_path:
         roi_mask, occupancy_mask = load_prior_masks(prior_path)
         if roi_mask is not None:

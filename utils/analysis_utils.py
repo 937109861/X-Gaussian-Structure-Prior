@@ -99,6 +99,7 @@ def save_init_statistics(model_path, init_info, gaussians=None):
 def export_gaussian_statistics(model_path, iteration, gaussians, bins=20, allocation_stats=None):
     xyz = _to_numpy(gaussians.get_xyz)
     opacity = _to_numpy(gaussians.get_opacity).reshape(-1)
+    radiodensity = _to_numpy(gaussians.get_radiodensity).reshape(-1) if hasattr(gaussians, "get_radiodensity") else opacity
     scaling = _to_numpy(gaussians.get_scaling)
 
     norms = np.linalg.norm(xyz, axis=1) if xyz.size > 0 else np.asarray([])
@@ -109,6 +110,10 @@ def export_gaussian_statistics(model_path, iteration, gaussians, bins=20, alloca
         "opacity": {
             "summary": _summary_stats(opacity),
             "histogram": _histogram(opacity, bins=bins),
+        },
+        "radiodensity": {
+            "summary": _summary_stats(radiodensity),
+            "histogram": _histogram(radiodensity, bins=bins),
         },
         "xyz": {
             "summary": {
@@ -146,6 +151,8 @@ def export_gaussian_statistics(model_path, iteration, gaussians, bins=20, alloca
         "num_gaussians": stats["num_gaussians"],
         "opacity_mean": stats["opacity"]["summary"]["mean"],
         "opacity_std": stats["opacity"]["summary"]["std"],
+        "radiodensity_mean": stats["radiodensity"]["summary"]["mean"],
+        "radiodensity_std": stats["radiodensity"]["summary"]["std"],
     }
     if allocation_stats is not None:
         history_row.update({

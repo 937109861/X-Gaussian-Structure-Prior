@@ -1,46 +1,26 @@
-# Python / cache
+*.pyc
 __pycache__/
-*.py[cod]
-*.pyd
-*.so
-*.egg-info/
-.pytest_cache/
-
-# IDE
+*/__pycache__/
+.vscode
 .idea/
-.vscode/
-
-# Build artifacts
-build/
-dist/
-submodules/**/build/
-
-# Data and experiment outputs
+output
 data/
-output/
-tensorboard_3d/
-screenshots/
-
-# Large reconstruction artifacts
-*.pickle
-*.pkl
-*.npy
-*.npz
-*.raw
-*.mhd
-*.ply
-*.pth
-*.pt
-*.ckpt
-*.tar
-*.tar.gz
-*.zip
-
-# Presentation / local reports
-*.pptx
-new.png
-recon_volume*
-
-# OS
-.DS_Store
-Thumbs.db
+configs/*
+!configs/baseline_chest_30k.yaml
+!configs/dgr_volume_chest_5k_v2.yaml
+!configs/dgr_volume_chest_30k_v3_128.yaml
+!configs/dgr_volume_chest_60k_v4_128_strong.yaml
+!configs/dgr_volume_chest_60k_v5_128_dense_init.yaml
+!configs/dgr_volume_chest_60k_v6_128_antiblock.yaml
+!configs/dgr_volume_chest_60k_v7_128_supersample.yaml
+!configs/dgr_volume_chest_60k_v8_128_reg.yaml
+!configs/acui_refinement_occ_chest_30k.yaml
+!configs/acui_refinement_occ_vol_v3_chest_30k.yaml
+build
+diff_rasterization/diff_rast.egg-info
+diff_rasterization/dist
+tensorboard_3d
+screenshots
+/*.png
+/*.pptx
+~$*
